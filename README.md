@@ -8,7 +8,7 @@
 
 > Battle-tested CI/CD pipeline templates for Python, Node.js, and Go — GitHub Actions, Jenkins, and GitLab CI
 
-A production-grade collection of CI/CD pipeline templates maintained by **Barry Au Yeung**, senior DevOps engineer. These templates encode years of hard-won lessons from shipping software across startups and enterprise environments. Copy, adapt, and ship.
+A production-grade collection of CI/CD pipeline templates maintained by **Barry Au-Yeung**, senior DevOps engineer. These templates encode years of hard-won lessons from shipping software across startups and enterprise environments. Copy, adapt, and ship.
 
 ---
 
@@ -293,11 +293,11 @@ Please ensure:
 
 ## License
 
-MIT License — Copyright (c) 2026 Barry Au Yeung. See [LICENSE](LICENSE) for full text.
+MIT License — Copyright (c) 2026 Barry Au-Yeung. See [LICENSE](LICENSE) for full text.
 
 ---
 
-*Maintained by Barry Au Yeung. If a template saved you an afternoon, a star is appreciated.*
+*Maintained by Barry Au-Yeung. If a template saved you an afternoon, a star is appreciated.*
 # TODO: Add retry logic
 
 
