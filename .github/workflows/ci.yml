@@ -1,0 +1,111 @@
+name: CI — Validate Templates
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Lint YAML ─────────────────────────────────────────────────────────────
+  lint-yaml:
+    name: Lint YAML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint all YAML files
+        run: |
+          yamllint \
+            --strict \
+            --config-data '{extends: default, rules: {line-length: {max: 140}, truthy: {allowed-values: ["true", "false"]}}}' \
+            github-actions/ \
+            gitlab-ci/ \
+            .github/workflows/
+
+  # ── Lint Shell scripts ────────────────────────────────────────────────────
+  lint-shell:
+    name: Lint Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on all scripts
+        run: |
+          shellcheck --severity=warning scripts/*.sh
+
+  # ── Lint Jenkinsfiles (Groovy syntax check) ───────────────────────────────
+  lint-jenkins:
+    name: Validate Jenkinsfiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Jenkinsfiles are parseable
+        run: |
+          # Basic structural validation: check required pipeline keywords present
+          for file in jenkins/Jenkinsfile.*; do
+            echo "Validating $file..."
+            grep -q 'pipeline {' "$file" || (echo "FAIL: $file missing 'pipeline {'" && exit 1)
+            grep -q 'stages {' "$file" || (echo "FAIL: $file missing 'stages {'" && exit 1)
+            grep -q 'stage(' "$file"   || (echo "FAIL: $file missing stage() definitions" && exit 1)
+            echo "  OK: $file"
+          done
+
+  # ── Validate Makefile targets ─────────────────────────────────────────────
+  validate-makefile:
+    name: Validate Makefile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required targets exist
+        run: |
+          for target in help lint test build clean; do
+            grep -q "^${target}:" Makefile || (echo "FAIL: Makefile missing target '${target}'" && exit 1)
+            echo "  OK: target '$target' exists"
+          done
+
+  # ── Verify script permissions ─────────────────────────────────────────────
+  verify-permissions:
+    name: Verify script permissions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check scripts are executable
+        run: |
+          for script in scripts/*.sh; do
+            if [[ ! -x "$script" ]]; then
+              echo "FAIL: $script is not executable"
+              exit 1
+            fi
+            echo "  OK: $script is executable"
+          done
+
+  # ── Summary ───────────────────────────────────────────────────────────────
+  all-checks-pass:
+    name: All checks passed
+    runs-on: ubuntu-latest
+    needs:
+      - lint-yaml
+      - lint-shell
+      - lint-jenkins
+      - validate-makefile
+      - verify-permissions
+    steps:
+      - run: echo "All validation checks passed."

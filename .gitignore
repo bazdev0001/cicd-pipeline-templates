@@ -1,0 +1,67 @@
+# Generated release artifacts
+RELEASE_NOTES.md
+dist/
+*.tar.gz
+*.zip
+
+# Coverage reports
+coverage.out
+coverage.xml
+coverage.html
+htmlcov/
+.coverage
+.coverage.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+build/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+*.tgz
+
+# Go
+vendor/
+*.exe
+*.exe~
+*.test
+*.bench
+
+# Docker
+.docker/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment / secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*_rsa
+*_rsa.pub
+credentials.json
+secrets/
+
+# Local test outputs
+/tmp/
+*.log

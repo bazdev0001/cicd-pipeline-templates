@@ -1,0 +1,188 @@
+// ── CONFIG ──────────────────────────────────────────────────────────────────
+// Edit these values. Jenkins credential IDs must match what's configured in
+// Manage Jenkins → Credentials.
+def config = [
+    pythonVersion : '3.11',
+    imageName     : 'your-org/your-app',
+    registry      : 'docker.io',
+    dockerCredsId : 'docker-credentials',
+    slackChannel  : '#deployments',
+    slackCredsId  : 'slack-webhook',
+    coverageMin   : 80,
+]
+// ────────────────────────────────────────────────────────────────────────────
+
+pipeline {
+    agent {
+        docker {
+            image "python:${config.pythonVersion}-slim"
+            args  '-u root:root --tmpfs /tmp'
+        }
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    triggers {
+        // Poll SCM every 5 minutes as fallback if webhooks are unavailable
+        pollSCM('H/5 * * * *')
+    }
+
+    environment {
+        PIP_NO_CACHE_DIR = 'off'
+        PYTHONDONTWRITEBYTECODE = '1'
+        // Inject credentials so they're available as env vars
+        DOCKER_CREDS = credentials("${config.dockerCredsId}")
+        SLACK_WEBHOOK = credentials("${config.slackCredsId}")
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.GIT_COMMIT_MSG   = sh(script: 'git log -1 --pretty=%s', returnStdout: true).trim()
+                    env.BUILD_TAG        = "${env.BRANCH_NAME}-${env.GIT_COMMIT_SHORT}"
+                }
+                echo "Building ${env.BUILD_TAG}: ${env.GIT_COMMIT_MSG}"
+            }
+        }
+
+        stage('Install') {
+            steps {
+                sh '''
+                    python -m pip install --upgrade pip
+                    pip install -e ".[dev]"
+                '''
+            }
+        }
+
+        stage('Lint') {
+            parallel {
+                stage('ruff') {
+                    steps {
+                        sh 'ruff check --output-format=github .'
+                    }
+                }
+                stage('black') {
+                    steps {
+                        sh 'black --check --diff .'
+                    }
+                }
+                stage('mypy') {
+                    steps {
+                        sh 'mypy src/'
+                    }
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh """
+                    pytest \
+                        --cov=src \
+                        --cov-report=xml:coverage.xml \
+                        --cov-report=html:htmlcov \
+                        --cov-fail-under=${config.coverageMin} \
+                        --junitxml=test-results.xml \
+                        -v
+                """
+            }
+            post {
+                always {
+                    junit 'test-results.xml'
+                    publishHTML([
+                        allowMissing         : false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : 'htmlcov',
+                        reportFiles          : 'index.html',
+                        reportName           : 'Coverage Report',
+                    ])
+                }
+            }
+        }
+
+        stage('Build Distribution') {
+            steps {
+                sh '''
+                    pip install build
+                    python -m build
+                '''
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: 'dist/**', fingerprint: true
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                    tag pattern: /v\d+\.\d+\.\d+/, comparator: 'REGEXP'
+                }
+            }
+            steps {
+                script {
+                    def tag = env.TAG_NAME ? env.TAG_NAME : env.BUILD_TAG
+                    sh """
+                        echo \$DOCKER_CREDS_PSW | docker login -u \$DOCKER_CREDS_USR --password-stdin ${config.registry}
+                        docker buildx build \
+                            --platform linux/amd64,linux/arm64 \
+                            --tag ${config.registry}/${config.imageName}:${tag} \
+                            --push \
+                            .
+                    """
+                }
+            }
+        }
+
+        stage('Publish to PyPI') {
+            when {
+                tag pattern: /v\d+\.\d+\.\d+/, comparator: 'REGEXP'
+            }
+            environment {
+                PYPI_TOKEN = credentials('pypi-api-token')
+            }
+            steps {
+                sh '''
+                    pip install twine
+                    TWINE_PASSWORD=$PYPI_TOKEN twine upload --non-interactive dist/*
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'master') {
+                    sh """
+                        curl -X POST -H 'Content-type: application/json' \
+                          --data '{"text":":white_check_mark: *${env.JOB_NAME}* build ${env.BUILD_NUMBER} passed (${env.GIT_COMMIT_SHORT})"}' \
+                          \$SLACK_WEBHOOK
+                    """
+                }
+            }
+        }
+        failure {
+            sh """
+                curl -X POST -H 'Content-type: application/json' \
+                  --data '{"text":":x: *${env.JOB_NAME}* build ${env.BUILD_NUMBER} FAILED — ${env.GIT_COMMIT_MSG}"}' \
+                  \$SLACK_WEBHOOK
+            """
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

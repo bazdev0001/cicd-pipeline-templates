@@ -1,0 +1,200 @@
+// ── CONFIG ──────────────────────────────────────────────────────────────────
+def config = [
+    goVersion     : '1.21',
+    binaryName    : 'your-app',
+    imageName     : 'your-org/your-app',
+    registry      : 'docker.io',
+    dockerCredsId : 'docker-credentials',
+    slackCredsId  : 'slack-webhook',
+    slackChannel  : '#deployments',
+    // Cross-compilation targets
+    buildTargets  : [
+        [os: 'linux',   arch: 'amd64'],
+        [os: 'linux',   arch: 'arm64'],
+        [os: 'darwin',  arch: 'amd64'],
+        [os: 'darwin',  arch: 'arm64'],
+        [os: 'windows', arch: 'amd64'],
+    ],
+]
+// ────────────────────────────────────────────────────────────────────────────
+
+pipeline {
+    agent {
+        docker {
+            image "golang:${config.goVersion}-alpine"
+            args  '-u root:root --tmpfs /tmp'
+        }
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+    }
+
+    environment {
+        CGO_ENABLED  = '0'
+        GOFLAGS      = '-mod=readonly'
+        DOCKER_CREDS = credentials("${config.dockerCredsId}")
+        SLACK_WEBHOOK = credentials("${config.slackCredsId}")
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.BUILD_VERSION    = sh(script: 'git describe --tags --always --dirty', returnStdout: true).trim()
+                }
+            }
+        }
+
+        stage('Dependencies') {
+            steps {
+                sh 'go mod download'
+                sh 'go mod verify'
+            }
+        }
+
+        stage('Vet & Lint') {
+            parallel {
+                stage('go vet') {
+                    steps { sh 'go vet ./...' }
+                }
+                stage('staticcheck') {
+                    steps {
+                        sh '''
+                            go install honnef.co/go/tools/cmd/staticcheck@latest
+                            staticcheck ./...
+                        '''
+                    }
+                }
+                stage('golangci-lint') {
+                    agent {
+                        docker {
+                            image 'golangci/golangci-lint:latest'
+                            reuseNode true
+                        }
+                    }
+                    steps {
+                        sh 'golangci-lint run --timeout=5m'
+                    }
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh '''
+                    go test \
+                        -race \
+                        -coverprofile=coverage.out \
+                        -covermode=atomic \
+                        ./...
+                    go tool cover -func=coverage.out
+                '''
+            }
+            post {
+                always {
+                    sh 'go tool cover -html=coverage.out -o coverage.html || true'
+                    publishHTML([
+                        reportDir   : '.',
+                        reportFiles : 'coverage.html',
+                        reportName  : 'Go Coverage',
+                        keepAll     : true,
+                    ])
+                }
+            }
+        }
+
+        stage('Cross-Compile') {
+            steps {
+                script {
+                    def ldflags = "-s -w -X main.Version=${env.BUILD_VERSION} -X main.Commit=${env.GIT_COMMIT_SHORT}"
+                    def parallelStages = [:]
+
+                    config.buildTargets.each { target ->
+                        def t = target  // closure capture
+                        def ext = (t.os == 'windows') ? '.exe' : ''
+                        def name = "${config.binaryName}-${t.os}-${t.arch}${ext}"
+
+                        parallelStages["${t.os}/${t.arch}"] = {
+                            sh """
+                                GOOS=${t.os} GOARCH=${t.arch} go build \
+                                    -ldflags="${ldflags}" \
+                                    -o dist/${name} \
+                                    ./cmd/${config.binaryName}
+                            """
+                        }
+                    }
+                    parallel parallelStages
+                }
+            }
+            post {
+                success {
+                    sh 'cd dist && sha256sum * > checksums.txt'
+                    archiveArtifacts artifacts: 'dist/**', fingerprint: true
+                }
+            }
+        }
+
+        stage('Docker Build & Push') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                    tag pattern: /v\d+\.\d+\.\d+/, comparator: 'REGEXP'
+                }
+            }
+            steps {
+                script {
+                    def tag = env.TAG_NAME ?: "${env.BRANCH_NAME}-${env.GIT_COMMIT_SHORT}"
+                    sh """
+                        echo \$DOCKER_CREDS_PSW | docker login -u \$DOCKER_CREDS_USR --password-stdin ${config.registry}
+                        docker buildx build \
+                            --platform linux/amd64,linux/arm64 \
+                            --build-arg VERSION=${env.BUILD_VERSION} \
+                            --build-arg COMMIT=${env.GIT_COMMIT_SHORT} \
+                            --tag ${config.registry}/${config.imageName}:${tag} \
+                            --push \
+                            .
+                    """
+                    if (env.TAG_NAME) {
+                        sh """
+                            docker buildx build \
+                                --platform linux/amd64,linux/arm64 \
+                                --tag ${config.registry}/${config.imageName}:latest \
+                                --push \
+                                .
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (env.BRANCH_NAME in ['main', 'master'] || env.TAG_NAME) {
+                    sh """
+                        curl -s -X POST -H 'Content-type: application/json' \
+                          --data '{"text":":white_check_mark: *${env.JOB_NAME}* build ${env.BUILD_NUMBER} succeeded (${env.BUILD_VERSION})"}' \
+                          \$SLACK_WEBHOOK
+                    """
+                }
+            }
+        }
+        failure {
+            sh """
+                curl -s -X POST -H 'Content-type: application/json' \
+                  --data '{"text":":x: *${env.JOB_NAME}* build ${env.BUILD_NUMBER} FAILED"}' \
+                  \$SLACK_WEBHOOK
+            """
+        }
+        always {
+            cleanWs()
+        }
+    }
+}
